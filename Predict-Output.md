@@ -746,4 +746,180 @@ End
 ### Q18 — Tricky!
 
 ```kotlin
-fun main() = runB
+fun main() = runBlocking {
+    println("Start") // 1. prints immediately
+
+    // CoroutineStart.LAZY means this coroutine does NOT
+    // start until something explicitly starts it —
+    // either .start() or .await() being called
+    val deferred = async(start = CoroutineStart.LAZY) {
+        println("Async running") // 3. only prints once started
+        42
+    }
+
+    // at this exact point, the async body has NOT run yet
+
+    println("Before await") // 2. prints immediately
+
+    // await() both STARTS the lazy async AND waits for its result
+    println("Result: ${deferred.await()}") // 4. starts it, then waits
+
+    println("End") // 5. prints last
+}
+```
+
+<details>
+<summary>📤 Reveal Output & Explanation</summary>
+
+**Output:**
+```
+Start
+Before await
+Async running
+Result: 42
+End
+```
+
+**Why:** Because of `CoroutineStart.LAZY`, the `async` block doesn't run at all until something explicitly triggers it. `"Before await"` prints while the coroutine is still idle. Calling `.await()` is what actually **starts** the lazy coroutine — only then does `"Async running"` print, followed by the result.
+
+> A regular `async` (without `LAZY`) starts immediately when called. `LAZY` only starts when `.start()` or `.await()` is explicitly invoked.
+
+</details>
+
+---
+
+### Q19 — Very Tricky!
+
+```kotlin
+fun main() = runBlocking {
+    println("Start") // 1. prints immediately
+
+    launch(Dispatchers.Unconfined) {
+        // Dispatchers.Unconfined is special: it starts running
+        // on the CURRENT thread immediately, with no scheduling
+        // delay at all — unlike a normal launch
+        println("Unconfined 1") // 2. prints IMMEDIATELY
+
+        delay(100) // after this suspension point, execution
+                   // resumes on whatever thread the delay
+                   // mechanism happens to use — not
+                   // necessarily the original thread
+
+        println("Unconfined 2") // 4. prints after the delay
+    }
+
+    // by the time we get here, "Unconfined 1" has
+    // ALREADY printed — Unconfined ran immediately, inline
+    println("End") // 3. prints after Unconfined 1, before Unconfined 2
+}
+```
+
+<details>
+<summary>📤 Reveal Output & Explanation</summary>
+
+**Output:**
+```
+Start
+Unconfined 1
+End
+Unconfined 2
+```
+
+**Why:** `Dispatchers.Unconfined` is unlike any other dispatcher — it runs on the **caller's current thread immediately**, without waiting to be scheduled, right up until its first suspension point. So `"Unconfined 1"` prints instantly, inline, before `main` even gets to its next line. `delay(100)` is that first suspension point — the coroutine pauses there, `main` continues and prints `"End"`, and only after the delay does `"Unconfined 2"` print.
+
+> ⚠️ Avoid `Dispatchers.Unconfined` in production code — its behavior is unpredictable and hard to reason about compared to `Default`, `IO`, or `Main`.
+
+</details>
+
+---
+
+### Q20 — SDE-2 Level!
+
+```kotlin
+fun main() = runBlocking {
+    println("Start") // 1. prints immediately
+
+    // coroutineScope suspends the CALLER until every
+    // coroutine launched inside it has completed —
+    // similar to runBlocking, but itself a suspend function
+    coroutineScope {
+
+        launch {
+            delay(200)
+            println("Launch 1") // 4. prints after 200ms
+        }
+
+        launch {
+            delay(100)
+            println("Launch 2") // 3. prints after 100ms
+        }
+
+        // this prints immediately — it doesn't wait
+        // for either launch above to finish
+        println("Inside coroutineScope") // 2. prints immediately
+    }
+    // execution is BLOCKED right here until both
+    // launches above have fully completed
+
+    println("After coroutineScope") // 5. prints after both are done
+    println("End")                  // 6. prints last
+}
+```
+
+<details>
+<summary>📤 Reveal Output & Explanation</summary>
+
+**Output:**
+```
+Start
+Inside coroutineScope
+Launch 2
+Launch 1
+After coroutineScope
+End
+```
+
+**Why:** `coroutineScope` suspends `runBlocking` until everything inside it finishes. `"Inside coroutineScope"` prints immediately since it doesn't wait for the two `launch` blocks. Launch 2 (100ms) finishes before Launch 1 (200ms). Only once **both** are done does `coroutineScope` itself complete, letting `"After coroutineScope"` and `"End"` print.
+
+**Key difference to remember:**
+| | Behavior |
+|---|---|
+| `coroutineScope` | suspends the caller until all children finish, and propagates exceptions |
+| `launch` | fire-and-forget, doesn't block the caller |
+
+</details>
+
+---
+
+## 🎁 Bonus — Concept
+
+### Q21
+
+```kotlin
+// coroutineScope — if ONE child fails, ALL siblings are cancelled
+coroutineScope {
+    launch { throw Exception("Failed") }
+    launch {
+        delay(100)
+        println("This is CANCELLED") // never runs
+    }
+}
+
+// supervisorScope — if ONE child fails, OTHER siblings continue
+supervisorScope {
+    launch { throw Exception("Failed") }
+    launch {
+        delay(100)
+        println("This STILL runs") // ✅ runs normally
+    }
+}
+```
+
+<details>
+<summary>📤 Reveal Explanation</summary>
+
+**Why:** `coroutineScope` treats all of its children as one all-or-nothing unit — one failure cancels the rest. `supervisorScope` isolates failures per child, so a sibling's crash doesn't take down the others. Reach for `supervisorScope` whenever the tasks you're launching are genuinely independent of each other.
+
+</details>
+
+---
