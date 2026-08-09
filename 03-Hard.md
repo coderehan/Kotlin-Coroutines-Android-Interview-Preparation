@@ -373,6 +373,45 @@ searchQueryFlow
 
 ---
 
-### 35. Backpressure
+35. Backpressure
+Backpressure is what happens when a producer emits values faster than a collector can keep up with processing them. Kotlin's Flow gives you a few different strategies for handling it, each suited to a different need: buffer() (keep everything, just don't wait), conflate() (skip the in-between values, keep only the latest), or collectLatest() (cancel and restart processing whenever something newer arrives).
+36. Channels
+A Channel is a hot, low-level communication pipe between coroutines that supports send/receive operations — the key distinguishing feature versus Flow is that each value sent through a Channel goes to exactly one receiver, not to every collector. It behaves more like a queue than a broadcast.
+Kotlin
+37. Channel vs Flow
+The main distinction is about delivery semantics: a Channel delivers each value to a single receiver (like a queue being consumed), whereas a Flow (especially when made hot via shareIn) can broadcast the same value to multiple collectors. Flow is generally the higher-level, more declarative tool; Channels are lower-level and more imperative.
 
-Backpressure is what happens when a producer emits values **faster** than a collector can keep up with processing them. Kotlin's Flow gives you a few different strategies for handling it, each suited to a different need: `buffer()` (keep everything, just don't wait), `conflate()` (skip the in-between values, keep only the latest), or `c
+Channel
+Flow
+Style
+hot, imperative (send/receive)
+cold by default, declarative (operators)
+Delivery
+one item → exactly one receiver
+one item → all collectors, if made hot
+38. callbackFlow
+callbackFlow is a builder specifically designed to bridge a callback-based API (like a Firebase real-time listener, or a legacy SDK) into a cold Flow, so the rest of your code can consume it using regular Flow operators instead of manually managing the callback's lifecycle everywhere it's used.
+Kotlin
+39. repeatOnLifecycle
+repeatOnLifecycle automatically starts and stops collecting a Flow based on the Android Lifecycle state — for example, only actively collecting while the screen is at least STARTED, and automatically cancelling the collection when the screen moves to the background, restarting it when it comes back. This avoids wasted work (and potential crashes) from collecting and updating UI that isn't actually visible.
+Kotlin
+40. Flow Cancellation
+Flow collection is cooperative, just like regular coroutines — cancelling the coroutine that's collecting a Flow stops that collection at its next suspension point, which is typically inside the emit() call in the producer. This means cancellation isn't necessarily instantaneous; it happens the next time the Flow machinery checks in, similar to how delay() acts as a cancellation checkpoint for regular coroutines.
+Kotlin
+41. Performance
+A handful of practical wins matter most in real apps: avoid running I/O work on Dispatchers.Default (it starves the limited pool meant for CPU work), avoid unnecessary withContext hops that just add overhead, prefer Flow's built-in operators (flowOn, buffer) over manually juggling threads yourself, and avoid launching huge numbers of coroutines for trivially small pieces of work, since even lightweight coroutines carry some overhead at scale.
+42. Senior-Level Mistakes
+A few mistakes tend to separate junior from senior-level coroutine usage:
+Mixing GlobalScope into production Android code, causing leaks.
+Using StateFlow for one-time events, which causes them to replay unexpectedly (e.g. re-showing a snackbar after screen rotation, since StateFlow always redelivers its latest value to new collectors).
+Not reaching for SupervisorJob in situations where independent failures are actually expected and shouldn't cascade.
+Running blocking calls inside Dispatchers.Default, which starves CPU-bound work meant to run there.
+43. Real-World Architecture
+A common, well-structured flow through the layers of an Android app looks like this: the UI observes a StateFlow<UiState> exposed by the ViewModel; the ViewModel runs inside viewModelScope, calling into a Repository; and the Repository is where actual Dispatchers.IO work — network calls and database access — happens, exposed back up as Flow.
+Code
+Kotlin
+44. Senior Interview Scenario
+"Two API calls must run in parallel, both must succeed, and a screen rotation shouldn't cancel or restart them."
+This question is really testing three separate concepts at once: parallelism (async/awaitAll), all-or-nothing failure handling (coroutineScope), and lifecycle survival (viewModelScope, since it survives configuration changes like rotation, unlike a scope tied directly to the Activity/Fragment view). The result is exposed via StateFlow, so after rotation the UI simply reads the latest already-computed state instead of re-triggering the work.
+Kotlin
+
