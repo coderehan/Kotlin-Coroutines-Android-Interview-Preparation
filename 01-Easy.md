@@ -2,8 +2,6 @@
 
 > Foundation questions. Every answer = **simple words + real-life example + Kotlin code.**
 
-**Topics:** [1](#1-what-is-a-coroutine) · [2](#2-why-do-we-need-coroutines) · [3](#3-coroutine-vs-thread) · [4](#4-what-is-suspend) · [5](#5-what-is-coroutinescope) · [6](#6-what-is-launch) · [7](#7-what-is-async) · [8](#8-what-is-await) · [9](#9-launch-vs-async) · [10](#10-what-is-runblocking) · [11](#11-what-is-delay) · [12](#12-what-are-dispatchers) · [13](#13-dispatchersmain) · [14](#14-dispatchersio) · [15](#15-dispatchersdefault) · [16](#16-what-is-withcontext) · [17](#17-what-is-a-job) · [18](#18-basic-cancellation)
-
 ---
 
 ### 1. What is a Coroutine?
