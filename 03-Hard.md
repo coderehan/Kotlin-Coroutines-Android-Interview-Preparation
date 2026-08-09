@@ -1,1474 +1,497 @@
-# 🔴 Kotlin Coroutines — Hard Level
+# 🔴 Hard — Kotlin Coroutines
 
-«Goal: Understand the Coroutine concepts expected from a Senior Android Engineer, not just how to use Coroutine APIs.»
-
-At Easy level:
-
-Coroutine
-   ↓
-Scope
-   ↓
-launch / async
-   ↓
-Dispatcher
-   ↓
-suspend
-   ↓
-Job
-   ↓
-Cancellation
-
-At Medium level:
-
-Structured Concurrency
-        ↓
-Parent / Child
-        ↓
-Exception Handling
-        ↓
-Cancellation
-        ↓
-Parallel Work
-        ↓
-supervisorScope
-        ↓
-viewModelScope
-
-Now we go deeper:
-
-                 COROUTINE INTERNALS
-                         │
-              ┌──────────┴──────────┐
-              ↓                     ↓
-         Suspension             Context
-              │                     │
-              ↓                     ↓
-        Continuation          Dispatcher
-              │
-              ↓
-        Coroutine State
-              │
-       ┌──────┼──────────┐
-       ↓      ↓          ↓
-    StateFlow SharedFlow Channel
-       │      │          │
-       └──────┼──────────┘
-              ↓
-           Flow
-              │
-       ┌──────┼─────────────┐
-       ↓      ↓             ↓
-    buffer  conflate   collectLatest
-       │
-       ↓
-   Backpressure
-
+> Internals, Flow, concurrency safety & senior-level scenarios.
 ---
 
-📚 Topics Covered
+### 1. Suspension Internals
 
-1. How Coroutine Suspension Actually Works
-2. What is Continuation?
-3. What happens when a "suspend" function suspends?
-4. Coroutine State Machine
-5. "CoroutineContext"
-6. Context Elements
-7. Dispatcher Internals
-8. "CoroutineContext" Combination
-9. "CoroutineName"
-10. "Job" Hierarchy
-11. "SupervisorJob" Deep Understanding
-12. Advanced Exception Propagation
-13. Cancellation vs Exception
-14. "CancellationException"
-15. Why you should not swallow "CancellationException"
-16. Shared Mutable State
-17. Race Conditions
-18. "Mutex"
-19. Atomic Operations
-20. Thread-safe Coroutine Design
-21. "StateFlow"
-22. "SharedFlow"
-23. "StateFlow" vs "SharedFlow"
-24. Cold Flow vs Hot Flow
-25. "stateIn"
-26. "shareIn"
-27. "flowOn"
-28. "buffer"
-29. "conflate"
-30. "collectLatest"
-31. "debounce"
-32. "combine"
-33. "zip"
-34. "flatMapLatest"
-35. Backpressure
-36. Channels
-37. Channel vs Flow
-38. "callbackFlow"
-39. "repeatOnLifecycle"
-40. Flow Cancellation
-41. Coroutine Performance
-42. Common Senior-Level Mistakes
-43. Real-World Android Architecture
-44. Senior Interview Scenarios
+The Kotlin compiler rewrites `suspend` functions using **Continuation-Passing Style (CPS)** — an extra hidden `Continuation` parameter is added so the function can pause and resume state later.
 
----
-
-1. 🧠 How Coroutine Suspension Actually Works
-
-This is one of the deeper Coroutine interview questions.
-
-You already know:
-
+```kotlin
+// what you write:
 suspend fun getUser(): User
 
-But what actually happens when a Coroutine suspends?
-
-The important idea:
-
-Coroutine
-   ↓
-Starts execution
-   ↓
-Reaches suspension point
-   ↓
-Saves its state
-   ↓
-Returns control
-   ↓
-Thread is free
-   ↓
-Operation completes
-   ↓
-Coroutine resumes
+// roughly what the compiler generates:
+fun getUser(continuation: Continuation<User>): Any?
+```
 
 ---
 
-🏠 Real-Life Example
+### 2. Continuation
 
-Imagine you're filling out a form.
+An object that remembers **where to resume** and holds the result/exception — think of it as a "callback with saved state."
 
-You reach a point where you need a document from another department.
-
-You don't stand there doing nothing.
-
-Fill Form
-   ↓
-Need Document
-   ↓
-Pause
-   ↓
-Do Other Work
-   ↓
-Document Arrives
-   ↓
-Continue Form
-
-That's similar to Coroutine suspension.
-
----
-
-2. 🔄 What is Continuation?
-
-A "Continuation" represents the rest of the work that should happen after a suspended function resumes.
-
-Very simplified:
-
-Before suspension
-       ↓
-   Suspend
-       ↓
-Continuation stores
-"what should happen next"
-       ↓
-Resume
-       ↓
-Continue execution
-
----
-
-🧠 Example
-
-Suppose:
-
-suspend fun loadUser() {
-
-    val user = getUser()
-
-    println(user)
+```kotlin
+interface Continuation<in T> {
+    val context: CoroutineContext
+    fun resumeWith(result: Result<T>)
 }
-
-Conceptually:
-
-getUser()
-   ↓
-Suspend
-   ↓
-Continuation remembers:
-"After getUser() completes,
-execute println(user)"
+```
 
 ---
 
-⚠️ Important
+### 3. What Happens When a Function Suspends?
 
-You don't normally implement "Continuation" manually in everyday Android development.
+The function returns a special marker (`COROUTINE_SUSPENDED`), the thread is freed, and later the `Continuation.resumeWith()` call resumes execution exactly where it paused.
 
-The Kotlin compiler transforms suspend functions into a form that uses continuations/state machines behind the scenes.
+🏠 Bookmarking a page mid-book — you close it (thread freed), and resume from that exact page later.
 
 ---
 
-3. ⏸️ What Happens When a "suspend" Function Suspends?
+### 4. Coroutine State Machine
 
-Consider:
+Each `suspend` function is compiled into a **state machine** — every suspension point becomes a numbered state, with a `when` switching between them.
 
-scope.launch {
-
-    println("A")
-
-    delay(1000)
-
-    println("B")
+```kotlin
+// Conceptually:
+when (label) {
+    0 -> { /* before delay() */ label = 1; delay(this) }
+    1 -> { /* after delay() resumes here */ }
 }
-
-Conceptually:
-
-Coroutine starts
-      ↓
-Print A
-      ↓
-delay()
-      ↓
-Coroutine suspends
-      ↓
-Thread becomes available
-      ↓
-1 second passes
-      ↓
-Coroutine resumes
-      ↓
-Print B
+```
 
 ---
 
-🔑 Important Interview Point
+### 5. `CoroutineContext`
 
-«Suspending a Coroutine does not mean blocking the thread.»
+A set of elements (Job, Dispatcher, name, exception handler) that describe **how and where** a coroutine runs — like a bundle of settings.
 
-This is one of the most important Coroutine concepts.
-
----
-
-4. 🤖 Coroutine State Machine
-
-The Kotlin compiler transforms suspend functions into a state machine.
-
-Example:
-
-suspend fun doWork() {
-
-    step1()
-
-    delay(1000)
-
-    step2()
-}
-
-Conceptually:
-
-State 0
-  ↓
-step1()
-  ↓
-State 1
-  ↓
-delay()
-  ↓
-SUSPEND
-  ↓
-RESUME
-  ↓
-State 2
-  ↓
-step2()
-  ↓
-Complete
-
-The compiler remembers where execution should continue.
+```kotlin
+val context = Dispatchers.IO + Job() + CoroutineName("Sync")
+```
 
 ---
 
-🧠 Interview Answer
+### 6. Context Elements
 
-If asked:
+Common elements: `Job` (lifecycle), `CoroutineDispatcher` (thread pool), `CoroutineName` (debug label), `CoroutineExceptionHandler` (error handling).
 
-«"How does Kotlin implement suspension?"»
-
-A good answer:
-
-«Kotlin's compiler transforms suspend functions into a state-machine-like form using Continuations. When a suspension point is reached, the Coroutine can return control without blocking the thread, and the continuation allows execution to resume from the appropriate state later.»
-
-That's enough for most interviews.
+```kotlin
+launch(Dispatchers.IO + CoroutineName("FetchUser")) { getUser() }
+```
 
 ---
 
-5. 🧩 What is "CoroutineContext"?
+### 7. Dispatcher Internals
 
-"CoroutineContext" contains information associated with a Coroutine.
-
-For example:
-
-CoroutineContext
-      │
- ┌────┼─────────────┐
- ↓    ↓             ↓
-Job Dispatcher CoroutineName
-
-Example:
-
-val context =
-    Job() +
-    Dispatchers.IO +
-    CoroutineName("UserRequest")
+Dispatchers are backed by **thread pools** (`IO` is large/elastic for blocking calls, `Default` is sized to CPU cores for compute work); `launch`/`withContext` route work to them via the context.
 
 ---
 
-🏠 Real-Life Example
+### 8. Context Combination
 
-Think of an employee's work profile:
+Contexts combine with `+`, and a later element **overrides** an earlier one of the same key.
 
-Employee
-   │
-   ├── Manager
-   ├── Department
-   └── Job Name
-
-Similarly, a Coroutine has contextual information.
+```kotlin
+val ctx = Dispatchers.IO + CoroutineName("A") + CoroutineName("B")
+// name is "B" — it overrides "A"
+```
 
 ---
 
-6. 🧱 Context Elements
+### 9. `CoroutineName`
 
-Common Coroutine context elements include:
+A debugging label attached to a coroutine's context — shows up in thread dumps/logs when debugging is enabled.
 
-Job
-CoroutineDispatcher
-CoroutineName
-CoroutineExceptionHandler
-
-Example:
-
-val context =
-    SupervisorJob() +
-    Dispatchers.IO +
-    CoroutineName("NetworkRequest")
-
-Then:
-
-CoroutineScope(context)
+```kotlin
+launch(CoroutineName("SyncUserData")) { sync() }
+```
 
 ---
 
-7. 🚦 Dispatcher Internals
+### 10. Job Hierarchy
 
-At a high level:
+Jobs form a **parent-child tree**; a parent only completes after all children complete, and cancelling a parent cancels the whole subtree.
 
-Dispatchers.Main
-       ↓
-Main/UI thread
-
-Dispatchers.IO
-       ↓
-Blocking I/O work
-
-Dispatchers.Default
-       ↓
-CPU-intensive work
-
-But there is an important nuance:
-
-«A Dispatcher is not simply "a thread."»
-
-It determines where Coroutine execution is dispatched, often using an underlying thread or thread pool.
+```kotlin
+val parentJob = Job()
+val child = Job(parentJob) // child.parent == parentJob
+```
 
 ---
 
-🧠 Interview Example
+### 11. `SupervisorJob` — Deep Dive
 
-Question:
+Unlike a normal `Job`, a child's **failure doesn't propagate up** — but cancellation of the supervisor still cancels all children (failure isolation is one-directional).
 
-«"If I use "Dispatchers.IO", does one Coroutine get one dedicated thread?"»
-
-Answer:
-
-«No. "Dispatchers.IO" uses a shared pool designed for blocking I/O work. A Coroutine is not permanently attached to one thread.»
-
----
-
-8. ➕ CoroutineContext Combination
-
-Contexts can be combined using:
-
-+
-
-Example:
-
-val context =
-    SupervisorJob() +
-    Dispatchers.IO +
-    CoroutineName("Download")
-
-Then:
-
-scope.launch(context) {
-    downloadFile()
-}
+```kotlin
+val supervisor = SupervisorJob()
+val scope = CoroutineScope(supervisor)
+scope.launch { throw Exception() } // isolated failure
+scope.launch { println("still runs") }
+```
 
 ---
 
-🧠 Memory Trick
+### 12. Advanced Exception Propagation
 
-Job
- +
-Dispatcher
- +
-Name
- +
-Handler
- =
-CoroutineContext
+In structured concurrency, the **first** child exception cancels siblings; further exceptions from other cancelled children are added as **suppressed exceptions** on the first one.
 
 ---
 
-9. 🏷️ What is "CoroutineName"?
+### 13. Cancellation vs Exception
 
-"CoroutineName" gives a Coroutine a readable name.
+Cancellation is a *signal*, implemented internally by throwing `CancellationException` — but it's treated specially: it doesn't trigger `CoroutineExceptionHandler` and shouldn't be logged as a real error.
 
-Example:
-
-CoroutineScope(
-    CoroutineName("DownloadCoroutine")
-).launch {
-
-    downloadFile()
-}
-
-This is especially useful during debugging.
-
----
-
-10. 🌳 Job Hierarchy — Deep Understanding
-
-Jobs form a hierarchy.
-
-Parent Job
-    │
-    ├── Child A
-    │
-    ├── Child B
-    │
-    └── Child C
-
-If parent is cancelled:
-
-Parent CANCELLED
-      ↓
-Children CANCELLED
-
-This is structured concurrency.
-
----
-
-11. 🛡️ SupervisorJob — Deep Understanding
-
-With:
-
-SupervisorJob()
-
-a child failure does not automatically cancel sibling children.
-
-SupervisorJob
-      │
- ┌────┼────┐
- ↓    ↓    ↓
- A    B    C
- ↓
-FAIL
-      │
-      ├── B continues
-      └── C continues
-
-But if the SupervisorJob itself is cancelled, its children are still cancelled.
-
----
-
-🔑 Remember
-
-«Supervisor isolates child failures; it does not ignore cancellation.»
-
----
-
-12. 💥 Advanced Exception Propagation
-
-Consider:
-
-coroutineScope {
-
-    launch {
-        throw Exception("Failed")
-    }
-
-    launch {
-        delay(5000)
-    }
-}
-
-The failure of one child normally causes the parent scope to fail and cancel the sibling.
-
-But:
-
-supervisorScope {
-
-    launch {
-        throw Exception("Failed")
-    }
-
-    launch {
-        delay(5000)
-        println("Still running")
-    }
-}
-
-The second child can continue.
-
----
-
-🧠 Senior-Level Thinking
-
-Don't just memorize:
-
-coroutineScope = fail all
-supervisorScope = independent
-
-Instead ask:
-
-«Are these tasks logically dependent or independent?»
-
-If dependent:
-
-User + Authentication
-
-Failure may need to stop the operation.
-
-If independent:
-
-Recommendations
-Notifications
-Ads
-
-One failure shouldn't necessarily destroy everything.
-
----
-
-13. 🛑 Cancellation vs Exception
-
-This distinction is extremely important.
-
-Cancellation is a normal control mechanism.
-
-job.cancel()
-
-An exception represents failure.
-
-throw RuntimeException()
-
-Conceptually:
-
-Cancellation
-    ↓
-"Stop this work."
-
-Exception
-    ↓
-"Something went wrong."
-
----
-
-14. ⚠️ What is "CancellationException"?
-
-Coroutine cancellation is represented using "CancellationException".
-
-Example:
-
-try {
-
-    delay(5000)
-
-} catch (e: CancellationException) {
-
-    println("Coroutine cancelled")
-
-    throw e
-}
-
----
-
-15. 🚨 Why Shouldn't You Swallow "CancellationException"?
-
-This is a common senior-level question.
-
-Bad:
-
-try {
-
-    delay(5000)
-
+```kotlin
+catch (e: CancellationException) {
+    throw e // always rethrow, never swallow
 } catch (e: Exception) {
-
-    println("Error")
+    log(e)
 }
-
-Why?
-
-Because "CancellationException" is also an "Exception".
-
-You might accidentally catch cancellation and prevent it from propagating correctly.
-
-Better:
-
-try {
-
-    delay(5000)
-
-} catch (e: CancellationException) {
-
-    throw e
-
-} catch (e: Exception) {
-
-    println("Actual failure")
-}
+```
 
 ---
 
-🔑 Remember
+### 14. `CancellationException`
 
-«Cancellation is part of Coroutine control flow. Don't accidentally convert cancellation into a normal error.»
+The exception type used internally to unwind a cancelled coroutine's stack — coroutines machinery treats it as "normal" cancellation, not a failure.
 
 ---
 
-16. 🔐 Shared Mutable State
+### 15. Don't Swallow `CancellationException`
 
-Suppose two Coroutines modify the same variable.
+Catching `Exception` broadly and not rethrowing `CancellationException` breaks cooperative cancellation — the coroutine looks alive but never actually stops.
 
+```kotlin
+// ❌ breaks cancellation
+try { work() } catch (e: Exception) { log(e) }
+
+// ✅ correct
+try { work() } catch (e: CancellationException) { throw e }
+  catch (e: Exception) { log(e) }
+```
+
+---
+
+### 16. Shared Mutable State
+
+Multiple coroutines writing to the **same variable concurrently** (e.g. on `Dispatchers.Default`) can corrupt data — coroutines don't make shared state automatically safe.
+
+```kotlin
 var counter = 0
-
-coroutineScope {
-
-    repeat(1000) {
-
-        launch {
-
-            counter++
-        }
-    }
-}
-
-You might expect:
-
-1000
-
-But concurrent access can cause a race condition.
+repeat(1000) { launch(Dispatchers.Default) { counter++ } } // unsafe!
+```
 
 ---
 
-17. 🏁 Race Condition
+### 17. Race Condition
 
-A race condition happens when multiple Coroutines/threads access shared mutable state in an unsafe way.
+Two coroutines read-modify-write the same value **at the same time**, and one update overwrites the other — the final result becomes unpredictable.
 
-Example:
-
-Coroutine A       Coroutine B
-
-Read 0            Read 0
-  ↓                 ↓
-Add 1             Add 1
-  ↓                 ↓
-Write 1           Write 1
-
-Expected:
-
-2
-
-Actual:
-
-1
-
-One update was lost.
+🏠 Two people editing the same shared spreadsheet cell at once — the last save wins, the other's edit is lost.
 
 ---
 
-18. 🔒 What is "Mutex"?
+### 18. `Mutex`
 
-"Mutex" provides mutual exclusion for Coroutine code.
+A coroutine-friendly **lock** — only one coroutine can hold it at a time, and waiting suspends instead of blocking the thread.
 
-Example:
-
+```kotlin
 val mutex = Mutex()
-
 var counter = 0
-
-coroutineScope {
-
-    repeat(1000) {
-
-        launch {
-
-            mutex.withLock {
-
-                counter++
-            }
-        }
-    }
-}
-
-Now only one Coroutine enters the critical section at a time.
+launch { mutex.withLock { counter++ } }
+```
 
 ---
 
-🏠 Real-Life Example
+### 19. Atomic Operations
 
-Imagine one bathroom with one key.
+Thread-safe operations on a single value using classes like `AtomicInteger`, useful for simple counters without a full `Mutex`.
 
-Person A
-   ↓
-Gets key
-   ↓
-Uses bathroom
-   ↓
-Returns key
-
-Person B
-   ↓
-Gets key
-
-Only one person enters at a time.
-
-That's similar to "Mutex".
-
----
-
-19. ⚛️ Atomic Operations
-
-For simple shared counters, atomic operations can be useful.
-
-Example:
-
+```kotlin
 val counter = AtomicInteger(0)
-
-counter.incrementAndGet()
-
-Atomic operations ensure certain operations happen safely without a race between threads.
+repeat(1000) { launch(Dispatchers.Default) { counter.incrementAndGet() } }
+```
 
 ---
 
-🧠 "Mutex" vs Atomic
+### 20. Thread-Safe Coroutine Design
 
-Atomic
-  ↓
-Simple atomic state updates
-
-Mutex
-  ↓
-Protect a larger critical section
+Prefer confining mutable state to **one coroutine/dispatcher**, or protect it with `Mutex`/`Atomic*`, instead of sharing raw mutable variables across coroutines.
 
 ---
 
-20. 🛡️ Thread-Safe Coroutine Design
+### 21. `StateFlow`
 
-A senior engineer should think:
+A **hot**, observable state holder that always has a current value and only emits distinct updates — ideal for UI state.
 
-«"How can I avoid shared mutable state instead of simply locking everything?"»
-
-Prefer immutable state where possible.
-
-Instead of:
-
-var users = mutableListOf<User>()
-
-Prefer controlled state updates such as:
-
-private val _users = MutableStateFlow<List<User>>(emptyList())
-
-val users = _users.asStateFlow()
-
-Then update state in a controlled manner.
+```kotlin
+private val _uiState = MutableStateFlow(UiState.Loading)
+val uiState: StateFlow<UiState> = _uiState
+```
 
 ---
 
-21. 📦 What is "StateFlow"?
+### 22. `SharedFlow`
 
-"StateFlow" is a hot Flow that represents a current state.
+A **hot** stream for events (no initial value required), configurable replay/buffer — good for one-off events like "show a toast."
 
-It always has a current value.
-
-Example:
-
-private val _uiState =
-    MutableStateFlow(UiState())
-
-val uiState =
-    _uiState.asStateFlow()
-
-Update:
-
-_uiState.value =
-    UiState(
-        isLoading = false
-    )
+```kotlin
+private val _events = MutableSharedFlow<String>()
+val events: SharedFlow<String> = _events
+```
 
 ---
 
-🏠 Real-Life Example
+### 23. `StateFlow` vs `SharedFlow`
 
-Imagine a restaurant display board.
-
-It always shows the current status:
-
-Order #101 → Preparing
-
-If someone looks at the board later, they see the current state.
-
-That's similar to "StateFlow".
+| | `StateFlow` | `SharedFlow` |
+|---|---|---|
+| Initial value | required | optional |
+| Use for | UI state | one-time events |
+| Duplicate emissions | dropped if same value | configurable |
 
 ---
 
-22. 🔥 What is "SharedFlow"?
+### 24. Cold vs Hot Flow
 
-"SharedFlow" is a hot Flow designed to broadcast emissions to multiple collectors.
+A **cold** `Flow` starts producing only when collected (each collector gets its own run). A **hot** flow (`StateFlow`/`SharedFlow`) runs independently and broadcasts to all collectors.
 
-Example:
-
-private val _events = MutableSharedFlow<UiEvent>()
-
-val events = _events.asSharedFlow()
-
-Emit:
-
-_events.emit(UiEvent.ShowMessage)
-
-Multiple collectors can observe it.
+```kotlin
+val cold = flow { emit(fetchData()) } // runs per collector
+val hot = MutableStateFlow(0)         // runs once, shared
+```
 
 ---
 
-🏠 Real-Life Example
+### 25. `stateIn`
 
-Imagine a public announcement:
+Converts a cold `Flow` into a hot `StateFlow`, sharing one upstream execution among collectors.
 
-Speaker
-   ↓
-Announcement
-   ↓
-Person A
-Person B
-Person C
-
-Multiple listeners can receive the event.
+```kotlin
+val uiState = repository.userFlow
+    .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), initial)
+```
 
 ---
 
-23. ⚔️ "StateFlow" vs "SharedFlow"
+### 26. `shareIn`
 
-Very common Android interview question.
+Converts a cold `Flow` into a hot `SharedFlow`, for sharing events across multiple collectors.
 
-"StateFlow"| "SharedFlow"
-Represents state| Represents events/broadcasts
-Always has a current value| Does not require a current state value
-Has an initial value| Can be configured with replay/buffer
-New collector gets current state| New collector receives according to replay configuration
-Common for UI state| Common for events
+```kotlin
+val sharedEvents = eventsFlow.shareIn(scope, SharingStarted.Eagerly, replay = 0)
+```
 
 ---
 
-🧠 Memory Trick
+### 27. `flowOn`
 
-StateFlow
-   ↓
-"What is the current state?"
+Changes the dispatcher used for **upstream** operators only — collection downstream stays on the caller's dispatcher.
 
-SharedFlow
-   ↓
-"What event should be shared?"
-
----
-
-24. ❄️ Cold Flow vs 🔥 Hot Flow
-
-Cold Flow
-
-A cold Flow starts producing values when collected.
-
-Example:
-
-val numbers = flow {
-
-    emit(1)
-    emit(2)
-    emit(3)
-}
-
-Each collector gets its own execution.
-
-Collector A
-    ↓
-Flow starts
-
-Collector B
-    ↓
-Flow starts again
+```kotlin
+flow { emit(readFile()) }
+    .flowOn(Dispatchers.IO) // upstream runs on IO
+    .collect { println(it) } // collect runs on caller's dispatcher
+```
 
 ---
 
-Hot Flow
+### 28. `buffer()`
 
-Hot Flow exists independently of collectors.
+Lets the producer keep emitting **without waiting** for a slow collector, storing items in a buffer.
 
-Examples:
-
-StateFlow
-SharedFlow
-
-Conceptually:
-
-             Hot Flow
-          /     |      \
-         ↓      ↓       ↓
-     Collector Collector Collector
+```kotlin
+flow { repeat(10) { emit(it) } }
+    .buffer()
+    .collect { delay(100); println(it) }
+```
 
 ---
 
-25. 🔄 What is "stateIn"?
+### 29. `conflate()`
 
-"stateIn" converts a Flow into a "StateFlow".
+If the collector is slow, **skip intermediate values** and only deliver the latest one — no buffering of old values.
 
-Example:
-
-val uiState =
-    repository.observeUser()
-        .stateIn(
-            scope = viewModelScope,
-            started = SharingStarted.WhileSubscribed(5000),
-            initialValue = UserState()
-        )
+```kotlin
+flow { repeat(10) { emit(it); delay(50) } }
+    .conflate()
+    .collect { delay(200); println(it) } // misses some in-between values
+```
 
 ---
 
-🧠 Why use it?
+### 30. `collectLatest()`
 
-It is useful when the UI needs:
+Cancels the **previous collector block** whenever a new value arrives, and restarts it with the new value.
 
-Current state
-   +
-Lifecycle-aware sharing
-   +
-Multiple collectors
-
----
-
-26. 📡 What is "shareIn"?
-
-"shareIn" converts a cold Flow into a shared hot flow.
-
-Example:
-
-val sharedUsers =
-    repository.observeUsers()
-        .shareIn(
-            scope = viewModelScope,
-            started = SharingStarted.WhileSubscribed(5000),
-            replay = 1
-        )
-
-Multiple collectors can share the upstream execution.
-
----
-
-27. 🚦 What is "flowOn"?
-
-"flowOn" changes the Coroutine context used by the upstream part of a Flow.
-
-Example:
-
-val users =
-    flow {
-        emit(repository.getUsers())
-    }
-    .flowOn(Dispatchers.IO)
-
-Conceptually:
-
-          IO
-           ↓
-        flow {}
-           ↓
-       flowOn(IO)
-           ↓
-        Collector
-
----
-
-⚠️ Important
-
-"flowOn" affects upstream operators, not downstream collection.
-
-Example:
-
-flow {
-
-    emit(getUsers())
-
-}
-.flowOn(Dispatchers.IO)
-.collect {
-    // Collector remains in its current context
-}
-
----
-
-28. 📦 What is "buffer()"?
-
-Suppose producer is faster than consumer.
-
-Without buffering:
-
-Producer
-   ↓
-Consumer
-   ↓
-Producer
-   ↓
-Consumer
-
-With:
-
-buffer()
-
-producer and consumer can overlap.
-
-Producer
- ↓
-Buffer
- ↓
-Consumer
-
----
-
-🏠 Real-Life Example
-
-A restaurant kitchen prepares food faster than customers pick it up.
-
-Instead of making the kitchen wait:
-
-Kitchen
-  ↓
-Food counter
-  ↓
-Customer
-
-The counter acts as a buffer.
-
----
-
-29. 🧹 What is "conflate()"?
-
-"conflate()" skips intermediate values when the consumer is slow.
-
-Example:
-
-Producer:
-1
-2
-3
-4
-5
-6
-
-Consumer may receive:
-
-1
-6
-
-The important idea:
-
-«Only the latest value matters.»
-
----
-
-🏠 Real-Life Example
-
-Imagine a GPS location.
-
-You don't necessarily need every location update.
-
-Location:
-10.0
-10.1
-10.2
-10.3
-10.4
-
-If the UI is slow, showing the latest location is more useful than processing every old location.
-
----
-
-30. ⚡ What is "collectLatest()"?
-
-"collectLatest()" cancels the previous collector block when a new value arrives.
-
-Example:
-
-queryFlow.collectLatest { query ->
-
-    search(query)
-}
-
-Suppose:
-
-"c"
-"ca"
-"cat"
-
-If ""ca"" search is still running and ""cat"" arrives:
-
-Search "ca"
-     ↓
-CANCELLED
-
-Search "cat"
-     ↓
-Runs
-
----
-
-🏠 Real-Life Example
-
-A user types:
-
-C
-Ca
-Cat
-
-You don't want to finish processing the old ""C"" search if ""Cat"" is already available.
-
----
-
-31. ⏱️ What is "debounce()"?
-
-"debounce()" waits until no new value arrives for a specified period.
-
-Example:
-
-queryFlow
-    .debounce(300)
-    .collectLatest { query ->
-        search(query)
-    }
-
-User types:
-
-C
-Ca
-Cat
-
-If each character arrives within 300ms:
-
-C
- ↓
-Ca
- ↓
-Cat
- ↓
-(wait 300ms)
- ↓
-Search "Cat"
-
----
-
-🏠 Real-Life Example
-
-Imagine a customer typing a message.
-
-You don't interrupt them after every character.
-
-You wait until they pause.
-
----
-
-32. 🔗 What is "combine()"?
-
-"combine()" combines the latest values from multiple Flows.
-
-Example:
-
-combine(
-    usernameFlow,
-    profileImageFlow
-) { username, image ->
-
-    Profile(
-        username,
-        image
-    )
-}
-
-If either Flow emits, the combined Flow can emit using the latest values from both.
-
----
-
-🏠 Real-Life Example
-
-Imagine a profile card:
-
-Name
-+
-Profile Image
-
-Whenever either changes, update the complete card.
-
----
-
-33. 🤝 What is "zip()"?
-
-"zip()" pairs values from two Flows.
-
-Example:
-
-flowA.zip(flowB) { a, b ->
-
-    Pair(a, b)
-}
-
-Conceptually:
-
-A1 ─────┐
-        ├── Pair(A1, B1)
-B1 ─────┘
-
-A2 ─────┐
-        ├── Pair(A2, B2)
-B2 ─────┘
-
----
-
-34. ⚔️ "combine()" vs "zip()"
-
-"combine()"| "zip()"
-Uses latest values| Pairs emissions
-Emits when either source updates after both have emitted| Waits for matching next values
-Good for UI state| Good for pairing sequences
-
----
-
-🧠 Memory Trick
-
-combine
-   ↓
-"Give me the latest from everyone."
-
-zip
-   ↓
-"Pair these values one by one."
-
----
-
-35. 🔄 What is "flatMapLatest()"?
-
-"flatMapLatest()" switches to a new Flow whenever a new upstream value arrives.
-
-The previous Flow is cancelled.
-
-Example:
-
-queryFlow
-    .flatMapLatest { query ->
-        searchFlow(query)
-    }
-
-Timeline:
-
-Query A
-   ↓
-Search A
-   ↓
-Query B arrives
-   ↓
-Cancel Search A
-   ↓
-Search B
-
----
-
-🏠 Real-Life Example
-
-Search:
-
-Android
-
-Then user changes it to:
-
-Android Compose
-
-The old search becomes irrelevant.
-
-Cancel it and start the new search.
-
----
-
-36. ⚖️ "collectLatest" vs "flatMapLatest"
-
-This is a great interview question.
-
-"collectLatest"
-
-Cancels the collector block.
-
+```kotlin
 flow.collectLatest { value ->
-    process(value)
-}
-
-"flatMapLatest"
-
-Cancels the previous inner Flow.
-
-flow.flatMapLatest { value ->
-    anotherFlow(value)
-}
-
----
-
-🧠 Memory Trick
-
-collectLatest
-     ↓
-Cancel previous processing
-
-flatMapLatest
-     ↓
-Cancel previous inner Flow
-
----
-
-37. 🚦 What is Backpressure?
-
-Backpressure happens when:
-
-Producer
-   ↓
-Produces FAST
-
-Consumer
-   ↓
-Processes SLOW
-
-Example:
-
-Producer: 100 values/sec
-Consumer: 10 values/sec
-
-The system needs a strategy.
-
-Possible tools:
-
-buffer()
-conflate()
-collectLatest()
-
----
-
-38. 📬 What is Channel?
-
-A "Channel" provides a way for Coroutines to communicate by sending and receiving values.
-
-Example:
-
-val channel = Channel<Int>()
-
-launch {
-    channel.send(10)
-}
-
-launch {
-    val value = channel.receive()
+    delay(1000) // cancelled if a newer value arrives mid-way
     println(value)
 }
-
-Conceptually:
-
-Producer
-   ↓
- Channel
-   ↓
-Consumer
+```
 
 ---
 
-39. ⚔️ Channel vs Flow
+### 31. `debounce()`
 
-A simple mental model:
+Only emits a value after a specified **quiet period** with no new emissions — great for search-as-you-type.
 
-Flow
- ↓
-Observe a stream of values
-
-Channel
- ↓
-Communicate / send values between Coroutines
-
-Channels are especially useful when you need queue-like communication.
+```kotlin
+searchQueryFlow
+    .debounce(300)
+    .collect { query -> search(query) }
+```
 
 ---
 
-40. 📞 What is "callbackFlow"?
+### 32. `combine()`
 
-"callbackFlow" bridges callback-based APIs into Flow.
+Combines the **latest** values from multiple flows whenever *any* of them emits.
 
-Example concept:
+```kotlin
+combine(nameFlow, ageFlow) { name, age -> "$name is $age" }
+    .collect { println(it) }
+```
 
-fun observeLocation(): Flow<Location> =
-    callbackFlow {
+---
 
-        val listener = object : LocationListener {
+### 33. `zip()`
 
-            override fun onLocationChanged(
-                location: Location
-            ) {
-                trySend(location)
-            }
-        }
+Pairs values from two flows **in order**, one-to-one — waits for both sides to emit before producing a pair.
 
-        registerListener(listener)
+```kotlin
+flowA.zip(flowB) { a, b -> a + b }.collect { println(it) }
+```
 
-        awaitClose {
-            unregisterListener(listener)
-        }
+---
+
+### 34. `flatMapLatest()`
+
+Maps each emission to a new flow, **cancelling the previous inner flow** when a new value arrives — like `switchMap`.
+
+```kotlin
+searchQueryFlow
+    .flatMapLatest { query -> api.searchFlow(query) }
+    .collect { results -> show(results) }
+```
+
+---
+
+### 35. Backpressure
+
+When a producer emits **faster** than a collector can consume — handled with `buffer()`, `conflate()`, or `collectLatest()` depending on whether you want to keep, skip, or restart.
+
+---
+
+### 36. Channels
+
+A **hot** communication pipe between coroutines — supports send/receive, and unlike Flow, each value goes to only *one* receiver.
+
+```kotlin
+val channel = Channel<Int>()
+launch { channel.send(1) }
+launch { println(channel.receive()) }
+```
+
+---
+
+### 37. Channel vs Flow
+
+| | Channel | Flow |
+|---|---|---|
+| Type | hot, imperative | cold (by default), declarative |
+| Delivery | one item → one receiver | one item → all collectors (if shared) |
+
+---
+
+### 38. `callbackFlow`
+
+Bridges a **callback-based API** (like a Firebase listener) into a cold `Flow`.
+
+```kotlin
+fun listenToUpdates() = callbackFlow {
+    val listener = Listener { trySend(it) }
+    api.register(listener)
+    awaitClose { api.unregister(listener) }
+}
+```
+
+---
+
+### 39. `repeatOnLifecycle`
+
+Automatically starts/stops collecting a Flow based on **Lifecycle state** — prevents collecting when the UI is in the background.
+
+```kotlin
+lifecycleScope.launch {
+    repeatOnLifecycle(Lifecycle.State.STARTED) {
+        viewModel.uiState.collect { render(it) }
     }
+}
+```
 
 ---
 
-🏠 Real-Life Example
+### 40. Flow Cancellation
 
-Old API:
+Flows are cooperative like coroutines — cancelling the collecting coroutine stops the Flow at its next suspension point (e.g. inside `emit`).
 
-Callback
-   ↓
-onSuccess()
-onError()
-onUpdate()
+```kotlin
+val job = launch { longFlow.collect { println(it) } }
+delay(500)
+job.cancel() // stops flow collection
+```
 
-Convert it into:
+---
 
-Flow
-   ↓
-collect()
+### 41. Performance
+
+Common wins: avoid `Dispatchers.Default` for I/O (starves CPU work), avoid unnecessary `withContext` hops, prefer `flowOn`/`buffer` over manual thread juggling, and don't over-launch thousands of coroutines doing tiny work.
+
+---
+
+### 42. Senior-Level Mistakes
+
+- Mixing `GlobalScope` into production Android code
+- Using `StateFlow` for one-time events (causes replays on rotation)
+- Not using `SupervisorJob` where independent failures are expected
+- Blocking calls inside `Dispatchers.Default`
+
+---
+
+### 43. Real-World Architecture
+
+```
+UI → ViewModel (viewModelScope) → UseCase → Repository (Dispatchers.IO)
+                                                 │
+                                        Network / Database
+                                                 │
+                                        Repository → Flow<Data>
+                                                 │
+                                    ViewModel → StateFlow<UiState> → UI
+```
+
+```kotlin
+class UserRepository(private val api: Api, private val dao: UserDao) {
+    fun observeUser(id: String): Flow<User> = dao.observeUser(id)
+        .flowOn(Dispatchers.IO)
+
+    suspend fun refreshUser(id: String) = withContext(Dispatchers.IO) {
+        dao.insert(api.fetchUser(id))
+    }
+}
+```
+
+---
+
+### 44. Senior Interview Scenario
+
+**"Two API calls must run in parallel, both must succeed, and a screen rotation shouldn't cancel or restart them."**
+
+Answer: use `viewModelScope` (survives rotation, tied to ViewModel) + `coroutineScope` with `async`/`awaitAll` for all-or-nothing parallelism, exposing the result via `StateFlow` so the UI just re-reads the latest state after rotation.
+
+```kotlin
+fun loadDashboard() = viewModelScope.launch {
+    val (user, posts) = coroutineScope {
+        val u = async { repo.getUser() }
+        val p = async { repo.getPosts() }
+        u.await() to p.await()
+    }
+    _uiState.value = UiState.Success(user, posts)
+}
+```
 
 ---
